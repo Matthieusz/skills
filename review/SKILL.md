@@ -1,92 +1,69 @@
 ---
 name: review
-description: "epistemic standards for evaluation and analysis. load before reviewing code, debugging, reporting findings, or any task where claims must be defensible. enforces trace-or-delete, confidence labeling, falsification."
+description: Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/PRD asked for?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X".
 ---
 
-# review
+Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 
-epistemic standards for producing defensible findings.
+- **Standards** — does the code conform to this repo's documented coding standards?
+- **Spec** — does the code faithfully implement the originating issue / PRD / spec?
 
-## when to load
+Both axes run as **parallel sub-agents** so they don't pollute each other's context, then this skill aggregates their findings.
 
-- evaluating code, docs, or designs
-- debugging / root cause analysis
-- codebase archaeology
-- any task where you will report findings to others
+The issue tracker should have been provided to you — run `/setup-matt-pocock-skills` if `docs/agents/issue-tracker.md` is missing.
 
-## principles
+## Process
 
-1. **trace or delete** — every claim traces to code, logs, or data. if you can't show the evidence, delete the claim or label it a hunch.
-   - *prevents: pattern → fact leap* — "this looks like X" silently becomes "this IS X"
+### 1. Pin the fixed point
 
-2. **facts, not assumptions** — "the code shows X" not "this is probably X". be specific: line numbers, exact conditions, concrete paths.
-   - *prevents: vague language hiding weak evidence* — hedging lets you avoid committing to what you actually know
+Whatever the user said is the fixed point — a commit SHA, branch name, tag, `main`, `HEAD~5`, etc. If they didn't specify one, ask for it.
 
-3. **label confidence** — VERIFIED (traced), HUNCH (pattern recognition, not traced), QUESTION (needs input). never present hunches as findings.
-   - *prevents: false certainty* — unlabeled claims inherit unearned authority
+Capture the diff command once: `git diff <fixed-point>...HEAD` (three-dot, so the comparison is against the merge-base). Also note the list of commits via `git log <fixed-point>..HEAD --oneline`.
 
-4. **falsify, don't confirm** — design tests that would DISPROVE your hypothesis. ask: "what would make this NOT a bug?"
-   - *prevents: confirmation bias* — you naturally notice supporting evidence and ignore contradictions; tunnel vision locks you into your first theory
+Before going further, confirm the fixed point resolves (`git rev-parse <fixed-point>`) and the diff is non-empty. A bad ref or empty diff should fail here — not inside two parallel sub-agents.
 
-## quality criteria
+### 2. Identify the spec source
 
-when evaluating contributions, check:
+Look for the originating spec, in this order:
 
-1. **proven correctness** — have you seen it work? not "does the code look right" — have you actually run it?
-2. **types tell the truth** — are you lying to the compiler? do abstractions match their names?
-3. **naming is honest** — would someone reading this in six months be confused?
-4. **edges tested** — what happens on the worst path, not just the happy path?
-5. **self-consistent abstractions** — can you explain it start to finish, and each part in isolation?
+1. Issue references in the commit messages (`#123`, `Closes #45`, GitLab `!67`, etc.) — fetch via the workflow in `docs/agents/issue-tracker.md`.
+2. A path the user passed as an argument.
+3. A PRD/spec file under `docs/`, `specs/`, or `.scratch/` matching the branch name or feature.
+4. If nothing is found, ask the user where the spec is. If they say there isn't one, the **Spec** sub-agent will skip and report "no spec available".
 
-slop indicators:
-- missing tests
-- contradictions in abstractions
-- names that lie about what they contain
+### 3. Identify the standards sources
 
-## applying to findings
+Anything in the repo that documents how code should be written, such as `CODING_STANDARDS.md` or `CONTRIBUTING.md`.
 
-before reporting an issue:
+### 4. Spawn both sub-agents in parallel
 
-```
-1. can i cite the exact code location? (line numbers, file paths)
-2. did i trace the actual conditions, or pattern-match?
-3. did i try to prove myself wrong?
-4. what's my confidence: VERIFIED / HUNCH / QUESTION?
-```
+Send a single message with two `Agent` tool calls. Use the `general-purpose` subagent for both.
 
-if any answer is weak, either investigate more or label appropriately.
+**Standards sub-agent prompt** — include:
 
-## report format
+- The full diff command and commit list.
+- The list of standards-source files you found in step 3.
+- The brief: "Report — per file/hunk where relevant — every place the diff violates a documented standard. Cite the standard (file + the rule). Distinguish hard violations from judgement calls. Skip anything tooling enforces. Under 400 words."
 
-```markdown
-## finding: <title>
+**Spec sub-agent prompt** — include:
 
-**confidence:** VERIFIED | HUNCH | QUESTION
-**location:** file:line or range
-**evidence:** what the code actually shows
-**falsification attempted:** what would disprove this, did i check?
-```
+- The diff command and commit list.
+- The path or fetched contents of the spec.
+- The brief: "Report: (a) requirements the spec asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for (scope creep); (c) requirements that look implemented but where the implementation looks wrong. Quote the spec line for each finding. Under 400 words."
 
-### counter-example (slop)
+If the spec is missing, skip the Spec sub-agent and note this in the final report.
 
-```markdown
-## finding: possible race condition
+### 5. Aggregate
 
-**confidence:** VERIFIED  
-**location:** src/cache/invalidator.ts
-**evidence:** the code looks like it might have a race condition because invalidate() calls multiple async functions
-**falsification attempted:** none
-```
+Present the two reports under `## Standards` and `## Spec` headings, verbatim or lightly cleaned. Do **not** merge or rerank findings — the two axes are deliberately separate (see _Why two axes_).
 
-problems: confidence says VERIFIED but evidence is "looks like" (pattern-match, not trace). no line numbers. no falsification. this is pattern→fact leap.
+End with a one-line summary: total findings per axis, and the worst issue _within each axis_ (if any). Don't pick a single winner across axes — that's the reranking the separation exists to prevent.
 
-### example (correct)
+## Why two axes
 
-```markdown
-## finding: race condition in cache invalidation
+A change can pass one axis and fail the other:
 
-**confidence:** VERIFIED
-**location:** src/cache/invalidator.ts:47-52
-**evidence:** `invalidate()` awaits `fetch()` but not `write()`. concurrent calls can read stale data between L47 fetch completing and L52 write persisting. reproduced by adding 50ms delay to write() and calling invalidate() twice in quick succession — second call returns stale value.
-**falsification attempted:** checked if a mutex guards the block (none). checked if write() is synchronous (it's not — returns Promise). confirmed issue by adding delay and observing stale read.
-```
+- Code that follows every standard but implements the wrong thing → **Standards pass, Spec fail.**
+- Code that does exactly what the issue asked but breaks the project's conventions → **Spec pass, Standards fail.**
+
+Reporting them separately stops one axis from masking the other.
